@@ -1,0 +1,96 @@
+name: Build the content
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: docker.pkg.github.com
+  IMAGE_NAME: ${{ github.repository }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    #       actions/checkout@v2 on 11/4/2021
+    - uses: actions/checkout@230611dbd0eb52da1e1f4f7bc8bb0c3a339fc8b7
+      name: "Check it out"
+    - name: "Startup"
+      run: pwd
+    - name: Package registry login
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: "Build the site"
+      run: |
+        docker run -i -v ${PWD}:/usr/local/site docker.pkg.github.com/khulnasoft/khulnasoft.github.io/custom-jekyll-builder:latest sh << COMMANDS
+        cd /usr/local/site
+        ls -la
+        bundle install
+        npm i
+        ./node_modules/gulp/bin/gulp.js build
+        JEKYLL_ENV=khulnasoft.github.io jekyll build
+        COMMANDS
+    - name: "Write content.json"
+      env:
+        GITSHA: ${{ github.sha }}
+      run: |
+          echo "{\"commitId\":\"$GITSHA\"}" > content.json
+          cat ./content.json
+          cp content.json _site/
+    - name: "Compress the static site"
+      run: zip -r ../site.zip .
+      working-directory: /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/_site
+    #       actions/upload-artifact/v2 on 11/4/2021
+    - uses: actions/upload-artifact@6fc84b101e3160d153b2b53314fa13f02a36ae96
+      name: "Store the site as an artifact"
+      with:
+        name: website
+        path: /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/site.zip
+    - name: "List site files"
+      working-directory: /home/runner/work/khulnasoft.github.io/khulnasoft.github.io
+      run: |
+        ls -la site.zip content.json
+    - uses: azure/cli@v2
+      name: "Upload to share via CLI (2024)"
+      with:
+        inlineScript: |
+          az storage file upload \
+            --account-key ${{ secrets.AZURE_FILES_SP }} \
+            --account-name ${{ vars.AZURE_FILES_USERNAME }} \
+            --source /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/site.zip \
+            -s oss-live
+          az storage file upload \
+            --account-key ${{ secrets.AZURE_FILES_SP }} \
+            --account-name ${{ vars.AZURE_FILES_USERNAME }} \
+            --source /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/content.json \
+            -s oss-live
+    - name: "Prepare to AzCopy..."
+      working-directory: /home/runner/work
+      run: |
+        mkdir azcopy
+        cd azcopy
+        wget https://aka.ms/downloadazcopy-v10-linux
+        mv downloadazcopy-v10-linux azcopy.tar.gz
+        tar -xvf azcopy.tar.gz
+        mv azcopy_linux* azcopy_linux
+        mv azcopy_linux/azcopy ./
+        ls -la
+    - name: "Copy to CDN"
+      if: false
+      working-directory: /home/runner/work/azcopy
+      env:
+        SASTOKEN: ${{ secrets.AZURE_CDN_SAS }}
+      run: |
+        ./azcopy sync /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/_site "https://osssite.blob.core.windows.net/cdn/$SASTOKEN" --recursive=true
+    - name: "Copy to static web container"
+      if: false
+      working-directory: /home/runner/work/azcopy
+      env:
+        AZCOPY_AUTO_LOGIN_TYPE: AZCLI
+      run: |
+        ./azcopy sync /home/runner/work/khulnasoft.github.io/khulnasoft.github.io/_site "https://osssite.blob.core.windows.net/\$web/$SASTOKEN" --recursive=true
+  
